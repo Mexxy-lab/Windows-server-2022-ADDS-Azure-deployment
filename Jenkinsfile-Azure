@@ -1,140 +1,343 @@
-
 pipeline {
+
+    // Run on the Jenkins agent with Terraform, Azure CLI, Ansible,
+    // Trivy, Git, and the SonarQube Scanner available.
     agent any
 
+    // Select whether to deploy or destroy the Azure environment.
+    parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['APPLY', 'DESTROY'],
+            description: 'Choose APPLY to deploy or DESTROY to remove the Azure AD lab environment.'
+        )
+    }
+
     options {
+        // Include timestamps in build logs.
         timestamps()
+
+        // Prevent simultaneous Azure infrastructure operations.
         disableConcurrentBuilds()
+
+        // Allow sufficient time for Windows provisioning and AD configuration.
         timeout(time: 4, unit: 'HOURS')
     }
 
     environment {
-        // Terraform installation.
+        // Run Terraform in automation mode.
         TF_IN_AUTOMATION = 'true'
 
-        // Shared Ansible virtual environment.
+        // Use the shared Ansible virtual environment.
         PATH = "/opt/jenkins-tools/ansible/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
-    }    
+    }
 
     stages {
+
+        // --------------------------------------------------
+        // 1. Checkout Azure AD Lab repository
+        // --------------------------------------------------
+
         stage('SCM Checkout') {
             steps {
                 checkout scm
 
                 sh '''
-                    echo "Azure Windows Server 2022 AD DS Deployment"
+                    set -e
+
+                    echo "Azure Windows Server 2022 AD DS Pipeline"
+                    echo "========================================"
+
+                    # Display the selected operation.
+                    echo "Selected action: $ACTION"
+
+                    # Display the checked-out commit.
                     git log -1 --oneline
+
+                    # Confirm the repository root.
+                    pwd
                 '''
             }
         }
 
-        stage('Pre-deployment Validation') {
+        // --------------------------------------------------
+        // 2. Validate prerequisites
+        // --------------------------------------------------
+
+        stage('Pre-deployment Checks') {
             steps {
                 sh '''
                     set -e
 
-                    # Confirm that the deployment script exists and has valid Bash syntax.
-                    test -f startupadds-azure.sh
-                    bash -n startupadds-azure.sh
+                    echo "=========================================="
+                    echo "Pipeline prerequisite validation"
+                    echo "=========================================="
 
-                    # Confirm that all required deployment tools are installed.
-                    for cmd in terraform az ansible-playbook ansible \
-                               ansible-inventory ansible-vault \
-                               ansible-galaxy python3; do
+                    # Confirm the Azure Terraform configuration exists.
+                    test -f azure-ad-lab-terraform/main.tf
+                    test -f azure-ad-lab-terraform/versions.tf
+
+                    # Confirm tools required for both operations.
+                    for cmd in terraform az trivy git; do
                         command -v "$cmd" >/dev/null 2>&1 || {
                             echo "ERROR: Missing required command: $cmd"
                             exit 1
                         }
                     done
 
-                    # Confirm that the Azure Terraform configuration exists.
-                    test -f azure-ad-lab-terraform/versions.tf
-                    test -f azure-ad-lab-terraform/main.tf
-                    test -f azure-ad-lab-terraform/terraform.tfvars
+                    # Deployment-only tools are not required for DESTROY.
+                    if [ "$ACTION" = "APPLY" ]; then
 
-                    echo "Azure deployment prerequisites passed."
+                        # Confirm the Azure deployment script exists.
+                        test -f startupadds-azure.sh
+
+                        # Validate Bash syntax without running deployment.
+                        bash -n startupadds-azure.sh
+
+                        # Confirm Ansible and Python tools are available.
+                        for cmd in ansible-playbook ansible \
+                                   ansible-inventory ansible-vault \
+                                   ansible-galaxy python3; do
+
+                            command -v "$cmd" >/dev/null 2>&1 || {
+                                echo "ERROR: Missing deployment command: $cmd"
+                                exit 1
+                            }
+                        done
+                    fi
+
+                    # Display installed tool versions.
+                    terraform version
+                    az version --output table
+                    trivy version
+
+                    if [ "$ACTION" = "APPLY" ]; then
+                        ansible --version
+                    fi
+
+                    echo "All required tools are available."
+                    echo "Pre-deployment validation passed."
                 '''
             }
         }
 
-        stage('Deployment Approval') {
+        // --------------------------------------------------
+        // 3. Trivy filesystem security scan
+        // --------------------------------------------------
+
+        stage('Trivy Scan') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=========================================="
+                    echo "Trivy filesystem security scan"
+                    echo "=========================================="
+
+                    # Scan the repository for vulnerable dependencies
+                    # and exposed secrets.
+                    trivy fs \
+                        --scanners vuln,secret \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        --format table \
+                        --skip-dirs .git \
+                        --skip-dirs .venv \
+                        --skip-dirs logs \
+                        --skip-dirs .terraform \
+                        --skip-dirs .ansible \
+                        .
+
+                    echo "=========================================="
+                    echo "Trivy Terraform IaC security scan"
+                    echo "=========================================="
+
+                    # Scan Terraform configuration for infrastructure
+                    # misconfigurations.
+                    trivy config \
+                        --misconfig-scanners terraform \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        --format table \
+                        --skip-dirs .git \
+                        --skip-dirs .venv \
+                        --skip-dirs logs \
+                        --skip-dirs .terraform \
+                        --skip-dirs .ansible \
+                        .
+
+                    echo "=========================================="
+                    echo "Trivy security scans passed."
+                    echo "=========================================="
+                '''
+            }
+        }
+
+        // --------------------------------------------------
+        // 4. SonarQube source-code and configuration analysis
+        // --------------------------------------------------
+
+        stage('SonarQube Analysis') {
             steps {
                 script {
-                    // Approval happens before the deployment script starts.
-                    // The script will create and display its Terraform plan afterward.
+
+                    // Use the scanner installation configured in Jenkins.
+                    def scannerHome = tool 'SonarScanner'
+
+                    // Connect to the configured SonarQube server.
+                    withSonarQubeEnv('SonarQube-Local') {
+
+                        sh """
+                            set -e
+
+                            echo "Starting SonarQube analysis."
+
+                            # Analyze the checked-out Azure AD Lab repository.
+                            "${scannerHome}/bin/sonar-scanner" \
+                                -Dsonar.projectKey=azure-windows-ad-lab \
+                                -Dsonar.projectName="Azure Windows AD Lab" \
+                                -Dsonar.projectVersion=1.0 \
+                                -Dsonar.sources=. \
+                                -Dsonar.sourceEncoding=UTF-8 \
+                                -Dsonar.exclusions="**/.git/**,**/.venv/**,**/venv/**,**/.terraform/**,**/.ansible/**,**/logs/**,**/vault.yml,**/*.tfstate,**/*.tfstate.backup,**/*.tfplan,**/*.pem,**/*.key"
+
+                            echo "SonarQube analysis submitted."
+                        """
+                    }
+                }
+            }
+        }
+
+        // --------------------------------------------------
+        // 5. Wait for SonarQube Quality Gate
+        // --------------------------------------------------
+
+        stage('SonarQube Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+
+                    // Stop the pipeline if the Quality Gate fails.
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        // --------------------------------------------------
+        // 6. APPLY: Manual deployment approval
+        // --------------------------------------------------
+
+        stage('Deployment Approval') {
+            when {
+                expression {
+                    params.ACTION == 'APPLY'
+                }
+            }
+            steps {
+                script {
+
+                    // Require approval before creating billable Azure resources.
                     input(
-                        message: 'Approve deployment of Windows Server 2022 AD DS infrastructure in Azure? This may create billable resources.',
+                        message: 'Approve deployment of the Windows Server 2022 AD DS infrastructure in Azure? This deployment may create billable resources.',
                         ok: 'Approve Azure Deployment'
                     )
                 }
             }
         }
 
-        stage('Deploy Azure Active Directory') {
+        // --------------------------------------------------
+        // 7. APPLY: Deploy Azure infrastructure and configure AD DS
+        // --------------------------------------------------
+
+        stage('Deploy Azure ADDS') {
+            when {
+                expression {
+                    params.ACTION == 'APPLY'
+                }
+            }
             steps {
+
+                // Retrieve Azure service principal credentials and
+                // Ansible Vault password securely from Jenkins Credentials.
                 withCredentials([
-                    usernamePassword(
-                        credentialsId: 'azure-service-principal',
-                        usernameVariable: 'ARM_CLIENT_ID',
-                        passwordVariable: 'ARM_CLIENT_SECRET'
+
+                    // Azure service principal application/client ID.
+                    string(
+                        credentialsId: 'azure_client_id',
+                        variable: 'ARM_CLIENT_ID'
                     ),
+
+                    // Azure service principal client secret.
+                    string(
+                        credentialsId: 'azure_client_secret',
+                        variable: 'ARM_CLIENT_SECRET'
+                    ),
+
+                    // Azure tenant ID.
                     string(
                         credentialsId: 'azure-tenant-id',
                         variable: 'ARM_TENANT_ID'
                     ),
+
+                    // Azure subscription ID.
                     string(
                         credentialsId: 'azure-subscription-id',
                         variable: 'ARM_SUBSCRIPTION_ID'
                     ),
+
+                    // Ansible Vault password file.
                     file(
                         credentialsId: 'ansible-vault-password-file',
                         variable: 'ANSIBLE_VAULT_PASSWORD_FILE'
                     )
                 ]) {
+
+                    // Authenticate to Azure and validate credentials.
+                    sh '''
+                        set +x
+                        set -e
+
+                        echo "=========================================="
+                        echo "Validating Azure credentials"
+                        echo "=========================================="
+
+                        # Authenticate using the Azure service principal.
+                        az login \
+                            --service-principal \
+                            --username "$ARM_CLIENT_ID" \
+                            --password "$ARM_CLIENT_SECRET" \
+                            --tenant "$ARM_TENANT_ID" \
+                            --output none
+
+                        # Select the Azure subscription for this deployment.
+                        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+
+                        # Display the authenticated Azure account.
+                        az account show \
+                            --query "{subscription:name, subscriptionId:id, tenantId:tenantId}" \
+                            --output table
+
+                        # Confirm that the Ansible Vault password file exists.
+                        test -r "$ANSIBLE_VAULT_PASSWORD_FILE"
+
+                        echo "Azure authentication and Vault validation passed."
+                    '''
+
+                    // The Jenkins approval stage has already been completed.
                     withEnv(['JENKINS_AUTO_APPROVE=true']) {
+
                         sh '''
-                            set -e
+                            # Prevent shell command tracing from exposing secrets.
                             set +x
+                            set -e
 
-                            # Keep Azure CLI authentication files in a temporary
-                            # directory rather than the Jenkins user's home directory.
-                            export AZURE_CONFIG_DIR="$(mktemp -d)"
-                            chmod 700 "$AZURE_CONFIG_DIR"
-
-                            # Remove temporary Azure authentication data when the
-                            # deployment command exits, whether successful or not.
-                            cleanup_azure_auth() {
-                                az logout >/dev/null 2>&1 || true
-                                rm -rf -- "$AZURE_CONFIG_DIR"
-                            }
-                            trap cleanup_azure_auth EXIT
-
-                            # Authenticate using the Jenkins-managed Azure
-                            # Service Principal credentials.
-                            az login \
-                                --service-principal \
-                                --username "$ARM_CLIENT_ID" \
-                                --password "$ARM_CLIENT_SECRET" \
-                                --tenant "$ARM_TENANT_ID" \
-                                --output none
-
-                            # Select the subscription used by this deployment.
-                            az account set --subscription "$ARM_SUBSCRIPTION_ID"
-
-                            # Verify the authenticated Azure subscription.
-                            az account show \
-                                --query '{name:name,id:id,tenantId:tenantId}' \
-                                --output table
-
-                            # Export the subscription ID for Terraform's
-                            # AzureRM provider authentication.
-                            export ARM_SUBSCRIPTION_ID
-                            export ARM_TENANT_ID
-                            export ARM_CLIENT_ID
-                            export ARM_CLIENT_SECRET
-
-                            # Run the Azure AD DS deployment.
+                            # Restrict access to the deployment script.
                             chmod 700 startupadds-azure.sh
+
+                            echo "=========================================="
+                            echo "Starting Azure Active Directory deployment"
+                            echo "=========================================="
+
+                            # Run the existing Azure deployment automation.
                             ./startupadds-azure.sh
                         '''
                     }
@@ -142,29 +345,288 @@ pipeline {
             }
         }
 
-        stage('Deployment Summary') {
+        // --------------------------------------------------
+        // 8. DESTROY: Generate Terraform destruction plan
+        // --------------------------------------------------
+
+        stage('Destroy Plan') {
+            when {
+                expression {
+                    params.ACTION == 'DESTROY'
+                }
+            }
             steps {
-                echo 'Azure Windows Server 2022 AD DS deployment completed.'
-                echo 'Review the deployment log and Terraform outputs.'
+
+                // Retrieve Azure service principal credentials for Terraform.
+                withCredentials([
+
+                    string(
+                        credentialsId: 'azure_client_id',
+                        variable: 'ARM_CLIENT_ID'
+                    ),
+
+                    string(
+                        credentialsId: 'azure_client_secret',
+                        variable: 'ARM_CLIENT_SECRET'
+                    ),
+
+                    string(
+                        credentialsId: 'azure-tenant-id',
+                        variable: 'ARM_TENANT_ID'
+                    ),
+
+                    string(
+                        credentialsId: 'azure-subscription-id',
+                        variable: 'ARM_SUBSCRIPTION_ID'
+                    )
+                ]) {
+
+                    // Authenticate to Azure before Terraform operations.
+                    sh '''
+                        set +x
+                        set -e
+
+                        az login \
+                            --service-principal \
+                            --username "$ARM_CLIENT_ID" \
+                            --password "$ARM_CLIENT_SECRET" \
+                            --tenant "$ARM_TENANT_ID" \
+                            --output none
+
+                        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+
+                        echo "Authenticated to Azure subscription."
+                    '''
+
+                    dir('azure-ad-lab-terraform') {
+                        sh '''
+                            set +x
+                            set -euo pipefail
+
+                            echo "=========================================="
+                            echo "Preparing Azure Terraform destruction plan"
+                            echo "=========================================="
+
+                            # Initialize the existing Terraform backend.
+                            terraform init -input=false
+
+                            # Display the selected Terraform workspace.
+                            terraform workspace show
+
+                            # Refuse to continue if Terraform has no tracked resources.
+                            if ! terraform state list | grep -q .; then
+                                echo "ERROR: Terraform state contains no managed resources."
+                                echo "Refusing to generate an empty destruction plan."
+                                exit 1
+                            fi
+
+                            # Generate a saved destruction plan without deleting resources.
+                            terraform plan \
+                                -destroy \
+                                -input=false \
+                                -lock-timeout=5m \
+                                -out=destroy.tfplan
+
+                            # Display the resources scheduled for destruction.
+                            echo "=========================================="
+                            echo "REVIEW THE FOLLOWING DESTRUCTION PLAN"
+                            echo "=========================================="
+
+                            terraform show -no-color destroy.tfplan
+
+                            echo "=========================================="
+                            echo "Destroy plan generated successfully."
+                            echo "No Azure resources have been destroyed yet."
+                            echo "=========================================="
+                        '''
+                    }
+                }
+            }
+        }
+
+        // --------------------------------------------------
+        // 9. DESTROY: Manual destruction approval
+        // --------------------------------------------------
+
+        stage('Destroy Approval') {
+            when {
+                expression {
+                    params.ACTION == 'DESTROY'
+                }
+            }
+            steps {
+                script {
+
+                    // Require explicit approval before removing Azure resources.
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input(
+                            message: 'WARNING: You are about to destroy the Azure Windows Server 2022 AD Lab environment. Review the Destroy Plan stage before approving.',
+                            ok: 'Destroy Azure Environment'
+                        )
+                    }
+                }
+            }
+        }
+
+        // --------------------------------------------------
+        // 10. DESTROY: Execute the approved Terraform plan
+        // --------------------------------------------------
+
+        stage('Destroy Azure Env') {
+            when {
+                expression {
+                    params.ACTION == 'DESTROY'
+                }
+            }
+            steps {
+
+                // Retrieve Azure service principal credentials for destruction.
+                withCredentials([
+
+                    string(
+                        credentialsId: 'azure_client_id',
+                        variable: 'ARM_CLIENT_ID'
+                    ),
+
+                    string(
+                        credentialsId: 'azure_client_secret',
+                        variable: 'ARM_CLIENT_SECRET'
+                    ),
+
+                    string(
+                        credentialsId: 'azure-tenant-id',
+                        variable: 'ARM_TENANT_ID'
+                    ),
+
+                    string(
+                        credentialsId: 'azure-subscription-id',
+                        variable: 'ARM_SUBSCRIPTION_ID'
+                    )
+                ]) {
+
+                    // Reauthenticate before executing the destruction plan.
+                    sh '''
+                        set +x
+                        set -e
+
+                        az login \
+                            --service-principal \
+                            --username "$ARM_CLIENT_ID" \
+                            --password "$ARM_CLIENT_SECRET" \
+                            --tenant "$ARM_TENANT_ID" \
+                            --output none
+
+                        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+                    '''
+
+                    dir('azure-ad-lab-terraform') {
+                        sh '''
+                            set +x
+                            set -euo pipefail
+
+                            echo "=========================================="
+                            echo "Destroying Azure Active Directory environment"
+                            echo "=========================================="
+
+                            # Ensure the saved plan exists before proceeding.
+                            test -s destroy.tfplan
+
+                            # Apply the exact destruction plan reviewed earlier.
+                            # Terraform will fail if the state has changed.
+                            terraform apply \
+                                -input=false \
+                                -lock-timeout=5m \
+                                -auto-approve \
+                                destroy.tfplan
+
+                            echo "=========================================="
+                            echo "Terraform destruction completed."
+                            echo "=========================================="
+
+                            # Confirm no managed resources remain in this state.
+                            if terraform state list | grep -q .; then
+                                echo "WARNING: Terraform state still contains resources."
+                                terraform state list
+                                exit 1
+                            fi
+
+                            echo "Terraform state contains no managed resources."
+                        '''
+                    }
+                }
+            }
+        }
+
+        // --------------------------------------------------
+        // 11. APPLY: Deployment completion
+        // --------------------------------------------------
+
+        stage('Deployment Summary') {
+            when {
+                expression {
+                    params.ACTION == 'APPLY'
+                }
+            }
+            steps {
+                echo 'Azure Windows Server 2022 AD DS deployment completed successfully.'
+                echo 'Trivy filesystem and Terraform security scans passed.'
+                echo 'SonarQube Quality Gate passed.'
+                echo 'Review deployment logs and Terraform outputs.'
+            }
+        }
+
+        // --------------------------------------------------
+        // 12. DESTROY: Completion summary
+        // --------------------------------------------------
+
+        stage('Destroy Summary') {
+            when {
+                expression {
+                    params.ACTION == 'DESTROY'
+                }
+            }
+            steps {
+                echo 'Azure Active Directory infrastructure destruction completed successfully.'
+                echo 'Terraform reports no remaining managed resources in this state.'
+                echo 'Review the Azure portal to confirm resource cleanup.'
             }
         }
     }
 
+    // --------------------------------------------------
+    // Pipeline completion and failure handling
+    // --------------------------------------------------
+
     post {
+
         success {
-            echo 'SUCCESS: Azure Active Directory deployment completed.'
+            script {
+                if (params.ACTION == 'APPLY') {
+                    echo 'SUCCESS: Azure Active Directory deployment completed.'
+                } else {
+                    echo 'SUCCESS: Azure Active Directory destruction completed.'
+                }
+
+                echo 'Trivy and SonarQube checks passed.'
+            }
         }
 
         failure {
-            echo 'FAILED: Azure Active Directory deployment encountered an error.'
-            echo 'Review the Jenkins console output and deployment log.'
+            echo 'FAILED: The selected Azure infrastructure operation encountered an error.'
+            echo 'Review the Jenkins console output and identify the failed stage.'
         }
 
         aborted {
-            echo 'Azure deployment was aborted or approval was declined.'
+            echo 'The pipeline was aborted or the approval was declined.'
         }
 
         always {
+            // Remove the saved destruction plan after the pipeline finishes.
+            // Terraform plan files can contain sensitive infrastructure data.
+            sh '''
+                rm -f azure-ad-lab-terraform/destroy.tfplan
+            '''
+
             echo 'Azure AD DS Jenkins pipeline execution finished.'
         }
     }

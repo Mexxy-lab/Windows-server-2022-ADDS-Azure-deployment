@@ -1,832 +1,884 @@
-# Windows Server 2022 Active Directory Domain Services (AD DS) – AWS Automated Deployment
+# Azure Windows Server 2022 Active Directory Domain Services (AD DS) Lab
 
-![AWS](https://img.shields.io/badge/Cloud-AWS-orange)
-![Windows Server](https://img.shields.io/badge/Windows%20Server-2022-blue)
-![Terraform](https://img.shields.io/badge/IaC-Terraform-844FBA)
-![Ansible](https://img.shields.io/badge/Configuration-Ansible-EE0000)
-![Jenkins](https://img.shields.io/badge/CI%2FCD-Jenkins-D24939)
-![Security](https://img.shields.io/badge/Security-Trivy%20%7C%20SonarQube-green)
+![Azure](https://img.shields.io/badge/Cloud-Microsoft%20Azure-0078D4?logo=microsoftazure&logoColor=white)
+![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?logo=terraform&logoColor=white)
+![Ansible](https://img.shields.io/badge/Configuration-Ansible-EE0000?logo=ansible&logoColor=white)
+![Windows Server](https://img.shields.io/badge/OS-Windows%20Server%202022-0078D6?logo=windows&logoColor=white)
+![Jenkins](https://img.shields.io/badge/CI%2FCD-Jenkins-D24939?logo=jenkins&logoColor=white)
+![Security](https://img.shields.io/badge/Security-Trivy%20%7C%20SonarQube-4B32C3)
 
 ## Project Overview
 
-This project automates the deployment of a Windows Server 2022 Active Directory Domain Services (AD DS) environment in Azure using Infrastructure as Code, configuration management, and a Jenkins CI/CD pipeline.
+This project automates the deployment and configuration of a Windows Server 2022 Active Directory Domain Services (AD DS) environment in Microsoft Azure.
 
-The solution provisions an AWS network, a Linux-based NAT instance, and private Windows EC2 instances. Ansible configures the Windows Domain Controller, installs and configures AD DS and DNS, creates the Active Directory organizational structure, imports domain accounts, and validates domain connectivity.
+It combines **Infrastructure as Code (IaC)**, configuration management, Windows administration, cloud networking, and CI/CD automation to create a functional Active Directory lab.
 
-The deployment is designed to avoid exposing Windows servers directly to the public internet. AWS Systems Manager (SSM) provides remote management, while temporary SSM port-forwarding sessions allow Ansible to communicate with Windows hosts over WinRM HTTPS.
+Terraform provisions the Azure infrastructure, Azure CLI supports authentication and VM management, and Ansible configures Windows Server and Active Directory through WinRM.
 
-The Jenkins pipeline automates validation, security scanning, code analysis, approval, deployment, and controlled infrastructure destruction.
+The environment includes a Windows Server 2022 domain controller and an optional Windows client that can be joined to the domain.
 
-![alt text](Pictures/windows-adds.png)
+The project demonstrates practical skills in:
 
-### Key objectives
+- Microsoft Azure infrastructure provisioning
+- Terraform infrastructure automation
+- Windows Server administration
+- Active Directory Domain Services
+- DNS and domain management
+- Ansible configuration management
+- PowerShell automation
+- Secure cloud access and credential management
+- Jenkins CI/CD pipeline implementation
+- Infrastructure security scanning
 
-- Build repeatable AWS infrastructure using Terraform.
-- Deploy Windows Server 2022 without public IP addresses on the Windows instances.
-- Configure a private network with controlled outbound internet access through a NAT instance.
-- Automate Windows configuration and Active Directory setup with Ansible.
-- Use AWS Systems Manager for private server management.
-- Secure Ansible credentials using encrypted Ansible Vault data and Jenkins credentials.
-- Validate Windows connectivity, domain configuration, organizational units, and domain accounts.
-- Integrate Trivy and SonarQube into Jenkins CI/CD.
-- Support controlled `APPLY` and `DESTROY` operations through a Jenkins build parameter.
+## Project Objectives
 
----
+The primary objectives are to:
+
+1. Provision Azure infrastructure using Terraform.
+2. Deploy a Windows Server 2022 domain controller.
+3. Configure Active Directory Domain Services.
+4. Configure DNS and establish the Active Directory domain.
+5. Create organizational units (OUs).
+6. Automate domain user creation from a CSV file.
+7. Provision an optional Windows client.
+8. Join the Windows client to the Active Directory domain.
+9. Validate domain controller, DNS, and client connectivity.
+10. Automate deployment and destruction through Jenkins.
 
 ## Architecture
 
-### AWS network design
-
-The AWS environment uses a VPC with separate public and private subnets.
-
-| Component | Configuration |
-| --- | --- |
-| AWS Region | `us-east-1` |
-| VPC | Project-specific VPC CIDR |
-| Public subnet | `10.20.1.0/24` |
-| Private subnet | `10.20.2.0/24` |
-| NAT instance | Amazon Linux 2023 |
-| NAT private IP | `10.20.1.10` |
-| Domain Controller | Windows Server 2022 |
-| DC private IP | `10.20.2.10` |
-| Optional Windows client | Windows Server/client test instance, depending on deployment configuration |
-| Client private IP | `10.20.2.20` |
-| Active Directory domain | `pumejlab.com` |
-| NetBIOS domain | `PUMEJLAB` |
-
-**Important:** Windows instances are deployed in the private subnet. They do not require public IP addresses or direct inbound RDP exposure.
-
-### Architecture diagram
+### High-level architecture diagram
 
 ```mermaid
 flowchart TB
-    ADMIN["Administrator"]
-    JENKINS["Jenkins CI/CD Server<br/>CentOS Stream 9"]
-    GITHUB["GitHub Repository"]
-
-    subgraph AWS["AWS - us-east-1"]
-        subgraph VPC["Project VPC"]
-            subgraph PUBLIC["Public Subnet - 10.20.1.0/24"]
-                NAT["Amazon Linux 2023<br/>NAT Instance<br/>10.20.1.10"]
-                IGW["Internet Gateway"]
-            end
-
-            subgraph PRIVATE["Private Subnet - 10.20.2.0/24"]
-                DC["Windows Server 2022<br/>Domain Controller<br/>10.20.2.10"]
-                CLIENT["Optional Windows Test Host<br/>10.20.2.20"]
-            end
-
-            SSM["AWS Systems Manager<br/>Session Manager"]
+    ADMIN["Administrator / DevOps Engineer"]
+    JENKINS["Jenkins CI/CD Pipeline"]
+    SECURITY["Trivy Security Scanning"]
+    SONAR["SonarQube Code Analysis"]
+    TF["Terraform"]
+    AZCLI["Azure CLI"]
+    ANSIBLE["Ansible Automation"]
+    
+    subgraph AZURE["Microsoft Azure - East US"]
+        RG["Resource Group: pumej-ad-lab-rg"]
+        
+        subgraph VNET["Virtual Network: 10.20.0.0/16"]
+            SUBNET["Subnet: 10.20.1.0/24"]
+            
+            DC["DC01 - Windows Server 2022"]
+            AD["Active Directory Domain Services"]
+            DNS["DNS Server"]
+            
+            CLIENT["Optional Windows Client"]
+            
+            DC --> AD
+            DC --> DNS
+            CLIENT -->|"Domain Join / DNS"| AD
         end
-
-        SECRETS["AWS Secrets Manager"]
+        
+        NSG["Network Security Group"]
+        PIP["Public IP Connectivity"]
     end
 
     ADMIN --> JENKINS
-    GITHUB --> JENKINS
-    JENKINS -->|"Terraform / AWS CLI / Ansible"| AWS
-    JENKINS -->|"SSM port forwarding<br/>WinRM HTTPS 5986"| SSM
-    SSM --> DC
-    SSM --> CLIENT
-    SECRETS --> DC
-    DC -->|"AD DS / DNS"| CLIENT
-    CLIENT -->|"Domain join validation"| DC
-    DC -->|"Outbound traffic"| NAT
-    CLIENT -->|"Outbound traffic"| NAT
-    NAT --> IGW
-    IGW -->|"Internet"| NAT
+    JENKINS --> SECURITY
+    JENKINS --> SONAR
+    JENKINS --> TF
+    TF --> RG
+    JENKINS --> AZCLI
+    AZCLI --> PIP
+    ANSIBLE -->|"WinRM over HTTPS"| DC
+    ANSIBLE -->|"WinRM over HTTPS"| CLIENT
+    NSG -.-> SUBNET
 ```
 
-### Network and management flow
+### Architecture components
 
-1. Terraform creates the VPC, public and private subnets, route tables, internet gateway, security groups, and EC2 instances.
-2. The Amazon Linux 2023 NAT instance provides outbound internet access for private instances.
-3. The Windows Domain Controller and optional test host are deployed in the private subnet.
-4. AWS Systems Manager manages the Windows instances without requiring public IP addresses or direct inbound RDP access.
-5. The deployment script establishes temporary SSM port-forwarding sessions.
-6. Ansible communicates with the Windows instances using WinRM over HTTPS on port `5986`.
-7. The Domain Controller provides Active Directory and DNS services.
-8. The optional Windows client validates domain joining and connectivity.
+| Component | Description |
+| --- | --- |
+| Microsoft Azure | Cloud infrastructure platform |
+| Resource Group | Contains the lab's Azure resources |
+| Virtual Network | Provides private network connectivity |
+| Subnet | Hosts the Windows virtual machines |
+| Network Security Group | Controls permitted network traffic |
+| DC01 | Windows Server 2022 domain controller |
+| Active Directory | Provides centralized identity and domain management |
+| DNS | Supports domain name resolution |
+| Windows Client | Optional domain-joined workstation |
+| Terraform | Provisions and manages Azure infrastructure |
+| Azure CLI | Authenticates and performs Azure VM operations |
+| Ansible | Automates Windows configuration through WinRM |
+| PowerShell | Supports Windows-specific administration tasks |
+| Jenkins | Orchestrates deployment, validation, and destruction |
 
----
+**Note:** The diagram represents the intended logical architecture. Confirm the final NSG rules, client DNS configuration, and connectivity against the deployed Terraform resources before treating every connection as validated.
+
+## Azure Environment Configuration
+
+The project uses the following Terraform configuration values.
+
+| Setting | Configuration |
+| --- | --- |
+| Cloud provider | Microsoft Azure |
+| Azure region | East US |
+| Resource group | `pumej-ad-lab-rg` |
+| Project name | `pumej-ad` |
+| Domain name | `pumejlab.com` |
+| NetBIOS name | `PUMEJLAB` |
+| Virtual network | `10.20.0.0/16` |
+| Subnet | `10.20.1.0/24` |
+| Domain controller | `DC01` |
+| VM size | `Standard_B2ms` |
+| OS disk size | 60 GB |
+| Local administrator | `labadmin` |
+| Optional Windows client | Enabled by default |
+
+The VM size and deployment options can be adjusted through Terraform variables.
+
+**Important:** The VM size shown above is the value in the current `terraform.tfvars`. The variable declaration has a different default, so review the active `.tfvars` file when changing deployment settings.
 
 ## Technology Stack
 
 | Technology | Purpose |
 | --- | --- |
-| AWS | Cloud infrastructure |
-| Terraform | Infrastructure provisioning |
-| Amazon Linux 2023 | NAT instance |
-| Windows Server 2022 | Active Directory Domain Controller |
-| Ansible | Windows configuration and AD DS automation |
-| PowerShell | Windows administration and configuration |
-| WinRM HTTPS | Secure Ansible-to-Windows communication |
-| AWS Systems Manager | Private instance management and port forwarding |
-| AWS Secrets Manager | Bootstrap secret management |
-| Ansible Vault | Encrypted Ansible secrets |
+| Microsoft Azure | Cloud infrastructure |
+| Terraform | Infrastructure as Code |
+| AzureRM Provider | Terraform integration with Azure |
+| Azure CLI | Azure authentication and VM management |
+| Ansible | Configuration management |
+| Ansible Vault | Protects sensitive credentials |
+| WinRM | Remote Windows management |
+| PowerShell | Windows and Active Directory administration |
+| Windows Server 2022 | Domain controller operating system |
+| Active Directory DS | Centralized identity and authentication |
+| DNS | Active Directory name resolution |
 | Jenkins | CI/CD orchestration |
-| Trivy | Vulnerability, misconfiguration, and secret scanning |
-| SonarQube | Static code analysis |
-| GitHub | Source control |
+| Trivy | Filesystem and Terraform security scanning |
+| SonarQube | Source code and configuration analysis |
+| Git | Version control |
 
----
+### Directory and file descriptions
 
-## Repository Structure
+**`azure-ad-lab-terraform/`**
 
-The project separates AWS infrastructure, Windows automation, deployment scripts, and Jenkins pipeline configuration.
+Contains the Terraform configuration for provisioning Azure resources, including the resource group, networking, virtual machines, and associated infrastructure.
 
-```text
-aws-windows-adlab/
-│
-├── aws-ad-lab-terraform/
-│   ├── main.tf
-│   ├── network.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── versions.tf
-│   └── ...
-│
-├── playbooks/
-│   ├── connection_test.yml
-│   ├── ...
-│
-├── group_vars/
-│   └── vault.yml
-│
-├── logs/
-│
-├── startupadds-aws.sh
-├── Jenkinsfile
-├── requirements-ansible.txt
-├── ansible.cfg
-├── .gitignore
-└── README.md
+**`playbooks/`**
+
+Contains Ansible playbooks for:
+
+- Testing WinRM connectivity.
+- Configuring the domain controller.
+- Creating Active Directory organizational units and users.
+- Joining the optional Windows client to the domain.
+- Validating the deployment.
+
+**`group_vars/`**
+
+Contains shared Windows configuration variables and encrypted Ansible Vault credentials.
+
+**`inventory/`**
+
+Contains Ansible inventory configuration used for Windows management.
+
+**`files/`**
+
+Contains the CSV source data used for automated domain user creation.
+
+**`scripts/`**
+
+Contains supporting PowerShell automation.
+
+**`startupadds-azure.sh`**
+
+Orchestrates the Azure deployment workflow, including Terraform provisioning, Azure VM operations, Ansible configuration, and deployment validation.
+
+**`Jenkinsfile-Azure`**
+
+Defines the Azure deployment and destruction CI/CD workflow.
+
+## Infrastructure Provisioning with Terraform
+
+Terraform is responsible for creating and managing the Azure infrastructure.
+
+The Terraform configuration is organized into logical components.
+
+### Infrastructure resources
+
+The deployment includes the following resource categories:
+
+- Azure Resource Group
+- Virtual Network
+- Subnet
+- Network Security Group and security rules
+- Network interfaces
+- Public IP connectivity
+- Windows Server virtual machines
+- OS disks and supporting compute resources
+
+The domain controller is named `DC01`. The optional Windows client is controlled by the `deploy_client` Terraform variable.
+
+### Terraform variables
+
+Example configuration:
+
+```hcl
+# Azure subscription and deployment location.
+location            = "East US"
+resource_group_name = "pumej-ad-lab-rg"
+project_name        = "pumej-ad"
+
+# Active Directory domain configuration.
+domain_name  = "pumejlab.com"
+netbios_name = "PUMEJLAB"
+
+# Azure virtual network configuration.
+vnet_address_space    = ["10.20.0.0/16"]
+subnet_address_prefix = "10.20.1.0/24"
+
+# Enable or disable the optional Windows client.
+deploy_client = true
+
+# Virtual machine configuration.
+vm_size         = "Standard_B2ms"
+admin_username  = "labadmin"
+os_disk_size_gb = 60
 ```
 
-The actual repository may contain additional Terraform files, Ansible playbooks, variable files, templates, and supporting scripts.
+The subscription ID, trusted administrator CIDR, and passwords should be supplied through appropriately protected configuration and credential mechanisms.
 
-**Security note:** `group_vars/vault.yml` contains encrypted Ansible Vault data. It must be present in the deployment workspace and tracked in Git in its encrypted form. The Jenkins Vault password credential is separate from this encrypted file.
+Do not copy personal subscription identifiers or public IP addresses into public documentation.
 
----
+### Initialize and validate Terraform
 
-## AWS Infrastructure Provisioning
+```bash
+# Navigate to the Azure Terraform directory.
+cd azure-ad-lab-terraform
 
-Terraform provisions the AWS environment.
+# Initialize the AzureRM provider and Terraform working directory.
+terraform init
 
-### Infrastructure components
+# Format Terraform configuration files.
+terraform fmt -recursive
 
-- VPC and subnet configuration.
-- Internet Gateway and public routing.
-- Private subnet and private route table.
-- Amazon Linux 2023 NAT instance.
-- NAT instance security group and forwarding configuration.
-- Windows security group.
-- Windows Server 2022 Domain Controller.
-- Optional Windows test/client instance.
-- IAM permissions and instance profiles required for Systems Manager.
-- AWS Secrets Manager integration for bootstrap credentials.
+# Validate the Terraform configuration.
+terraform validate
 
-### Network security
+# Review the infrastructure changes before deployment.
+terraform plan
+```
 
-The Windows security group restricts access to the project network and required management paths.
+### Deploy infrastructure
 
-The NAT instance provides controlled outbound connectivity for private Windows instances.
+The recommended deployment method is the project orchestration script described below, which coordinates Terraform and Ansible.
 
-The security groups include intentional HTTP/HTTPS egress exceptions. Trivy identified these rules as public-destination egress findings (`AVD-AWS-0104`). Rather than changing the NAT and Windows outbound networking design, documented inline Trivy suppressions were added to the affected security group resources.
+For direct Terraform operations, review the plan and supply the required sensitive variables securely before applying.
 
-These suppressions expire on **February 1, 2027**, and must be reassessed before that date.
-
-The exception does not mean public egress has been eliminated. The documented rules permit outbound TCP 80 and 443 because the NAT instance needs to forward internet traffic and private Windows servers require outbound connectivity for updates, Systems Manager, and downloads.
-
----
+```bash
+# Apply the reviewed Terraform configuration.
+terraform apply
+```
 
 ## Active Directory Configuration
 
-The deployment creates the Active Directory environment using Windows Server 2022.
+After Azure infrastructure provisioning, Ansible configures the Windows Server domain controller.
+
+### Domain controller configuration
+
+The domain controller is configured with:
 
 | Setting | Value |
 | --- | --- |
-| Domain controller hostname | `DC01` |
-| Domain name | `pumejlab.com` |
-| NetBIOS name | `PUMEJLAB` |
-| DC private IP | `10.20.2.10` |
-| DNS | Domain Controller |
-| Windows management | WinRM HTTPS |
-| WinRM port | `5986` |
+| Hostname | `DC01` |
+| Operating system | Windows Server 2022 |
+| Domain | `pumejlab.com` |
+| NetBIOS | `PUMEJLAB` |
+| AD DS | Installed and configured |
+| DNS | Installed and configured |
 
-### Active Directory automation
+### Active Directory Domain Services
 
-Ansible and PowerShell automate the following:
+The domain controller automation performs the following tasks:
 
-- Install the Active Directory Domain Services role.
-- Install and configure DNS.
-- Promote Windows Server 2022 to a Domain Controller.
-- Configure the Active Directory domain.
+1. Establishes authenticated WinRM connectivity.
+2. Installs the Active Directory Domain Services role.
+3. Installs the required management tools.
+4. Promotes the Windows Server to a domain controller.
+5. Configures the Active Directory domain.
+6. Reboots the domain controller when required.
+7. Waits for the domain controller to become available.
+8. Verifies AD DS and DNS service readiness.
+9. Re-establishes authenticated domain access.
+
+The deployment script uses Azure VM Run Command to perform readiness checks after domain controller promotion and reboot.
+
+### Organizational Units
+
+The Active Directory structure is designed to organize users by department.
+
+| Organizational Unit | Purpose |
+| --- | --- |
+| Admins | Administrative accounts |
+| Management | Management department |
+| IT | Information Technology |
+| HR | Human Resources |
+| Marketing | Marketing department |
+| Sales | Sales department |
+
+The OU structure provides a foundation for centralized user administration and future Group Policy configuration.
+
+### Automated domain user creation
+
+User account information is maintained in:
+
+```text
+files/user_accounts_final.csv
+```
+
+The user provisioning workflow uses Ansible and PowerShell to process the CSV and create Active Directory accounts.
+
+The workflow is designed to:
+
+- Read user records from CSV.
 - Create the required organizational units.
-- Import domain users from the project's user data.
-- Configure and validate domain membership.
-- Verify connectivity to the Domain Controller.
+- Create user accounts in their designated OUs.
+- Configure user attributes.
+- Apply the intended account settings.
+- Support repeatable configuration management.
 
-The project validates six organizational units and 119 domain accounts in the configured AD environment.
+### Windows client domain join
 
-### Organizational structure
+The project supports an optional Windows client.
 
-The Active Directory organizational structure includes:
+When enabled, the deployment workflow:
 
-- Admins
-- Management
-- IT
-- HR
-- Marketing
-- Sales
+1. Provisions the client VM.
+2. Establishes remote WinRM connectivity.
+3. Configures the client to use the domain controller for DNS.
+4. Joins the client to `pumejlab.com`.
+5. Validates domain membership and connectivity.
 
-The automation is designed to make the environment repeatable rather than requiring manual creation of users and OUs through Active Directory Users and Computers.
+**Important:** Active Directory domain joining depends on correct DNS configuration. The client must resolve the domain using the domain controller's DNS service. Verify that the Azure network and client NIC DNS settings point to DC01 before attempting the domain join.
 
----
+If `deploy_client` is disabled, the client deployment and domain-join stages are skipped.
 
-## Secure Windows Management with AWS SSM and WinRM
+## Ansible Configuration Management
 
-A major design decision is to keep Windows instances private while still allowing Ansible automation from Jenkins.
+Ansible manages the Windows configuration after Terraform provisions the infrastructure.
 
-### SSM management
+### WinRM connectivity
 
-AWS Systems Manager is used to:
+Ansible communicates with Windows Server using WinRM over HTTPS.
 
-- Verify that EC2 instances are registered and available.
-- Execute bootstrap and validation commands.
-- Retrieve or validate required Windows configuration.
-- Establish temporary port-forwarding sessions.
-- Avoid exposing WinRM or RDP directly to the internet.
+The Azure deployment workflow uses:
 
-### WinRM HTTPS
+- WinRM port `5986`
+- NTLM authentication
+- Ansible Windows connection plugins
+- Ansible Vault for protected credentials
 
-Ansible connects to Windows using WinRM HTTPS on port `5986`.
+The deployment script generates a temporary inventory using the Terraform outputs.
 
-The deployment creates temporary local SSM forwarding ports:
+This allows Ansible to target the provisioned Windows VMs without requiring manually maintained public IP addresses.
 
-| Windows host | Local forwarding port | Remote port |
-| --- | ---: | ---: |
-| DC01 | `15986` | `5986` |
-| Optional client | `15987` | `5986` |
+### Ansible playbooks
 
-The Ansible inventory uses the Windows computer names as connection hostnames, while the deployment script temporarily maps those hostnames to `127.0.0.1` on the Jenkins controller.
-
-This allows the Windows host's expected hostname to be used for the WinRM connection while the actual network traffic travels through the local SSM tunnel.
-
-The inventory uses WinRM HTTPS with NTLM authentication and certificate validation configured for the project's lab certificate setup.
-
-### Python dependencies
-
-The Ansible controller requires the Python WinRM library.
-
-Install it in the Python environment used by Ansible:
-
-```bash
-# Install Windows Remote Management support.
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
-python3 -m pip install pywinrm requests-ntlm
-```
-
-The Jenkins server uses a dedicated Ansible environment at:
-
-```text
-/opt/jenkins-tools/ansible
-```
-
-Install the dependency there:
-
-```bash
-# Install the WinRM libraries into the Jenkins Ansible environment.
-sudo /opt/jenkins-tools/ansible/bin/python -m pip install \
-    pywinrm requests-ntlm
-
-# Verify the WinRM module can be imported.
-sudo /opt/jenkins-tools/ansible/bin/python -c \
-'import winrm; print("pywinrm:", winrm.__version__)'
-```
-
-The deployment must use the same Python environment in which these dependencies are installed.
-
----
-
-## Ansible Automation
-
-Ansible handles the Windows configuration and Active Directory setup after Terraform provisions the infrastructure.
-
-### Automation workflow
-
-1. Validate the deployment prerequisites.
-2. Validate AWS credentials and the selected AWS region.
-3. Validate the encrypted Ansible Vault data and password file.
-4. Check EC2 instance readiness.
-5. Verify SSM availability.
-6. Establish SSM port-forwarding sessions.
-7. Validate WinRM HTTPS connectivity.
-8. Run the Windows connection test playbook.
-9. Configure the Domain Controller.
-10. Install and promote AD DS.
-11. Configure DNS and Active Directory.
-12. Create OUs and import domain users.
-13. Join and validate the optional Windows client.
-14. Run post-deployment checks.
-
-### Windows connectivity test
-
-The project includes:
-
-```text
-playbooks/connection_test.yml
-```
-
-This playbook verifies that Ansible can communicate with the Windows Domain Controller using the configured WinRM connection.
-
-A successful connection test is an important checkpoint before executing the AD DS configuration playbooks.
+| Playbook | Purpose |
+| --- | --- |
+| `connection_test.yml` | Tests authenticated Windows connectivity |
+| `domain_controller.yml` | Installs and configures AD DS |
+| `domain_users.yml` | Creates OUs and domain users |
+| `domain_client.yml` | Joins the Windows client to the domain |
+| `validate_deployment.yml` | Validates the AD DS deployment |
+| `validate_client.yml` | Validates the Windows client |
 
 ### Ansible Vault
 
-Sensitive values are protected using Ansible Vault.
+Sensitive information is protected using Ansible Vault.
 
-The encrypted file:
+The encrypted Vault file is:
 
 ```text
 group_vars/vault.yml
 ```
 
-contains protected automation data.
+It contains sensitive configuration such as:
 
-The Jenkins credential:
+- Bootstrap administrator password
+- Domain administrator password
+- Directory Services Restore Mode (DSRM) password
 
-```text
-ansible-vault-password-file
-```
-
-provides the password needed to decrypt the file.
-
-These are two separate requirements:
-
-- The encrypted `vault.yml` file must exist in the workspace.
-- The Vault password credential must be available to the pipeline.
-
-Having the password file alone does not replace the encrypted Ansible Vault data file.
-
----
-
-## Automated Deployment Script
-
-The main AWS deployment entry point is:
-
-```bash
-./startupadds-aws.sh
-```
-
-The script coordinates Terraform, AWS CLI, Systems Manager, Ansible, and Windows validation.
-
-### Deployment responsibilities
-
-- Validate required local tools and project files.
-- Validate AWS authentication.
-- Initialize and apply the Terraform infrastructure.
-- Read Terraform outputs and instance information.
-- Validate Windows instance and SSM readiness.
-- Retrieve or validate bootstrap credentials.
-- Establish temporary hostname mappings.
-- Establish SSM port-forwarding sessions.
-- Execute Ansible playbooks.
-- Validate Active Directory and domain membership.
-- Clean up temporary hostname mappings and SSM tunnels.
-- Write deployment logs.
-
-### Deployment logs
-
-Logs are stored in:
-
-```text
-logs/
-```
-
-Each deployment generates a timestamped log file.
+The Vault password must be supplied securely at runtime.
 
 Example:
 
-```text
-logs/startupadds-20261031-230158.log
+```bash
+# Decrypt the Vault file only when required for inspection.
+ansible-vault view group_vars/vault.yml
 ```
 
-The script uses cleanup handling to stop temporary SSM sessions and remove temporary hostname mappings when deployment exits.
+Never commit decrypted Vault data, password files, or credentials to Git.
 
-**Operational note:** If the script reports that it could not remove the temporary `/etc/hosts` block, inspect `/etc/hosts` on the Jenkins controller and remove only the marked deployment block after confirming that it is no longer needed. Do not overwrite the entire hosts file.
+## Automated Deployment
 
----
+The primary deployment entry point is:
 
-## Jenkins CI/CD Integration
+```bash
+./startupadds-azure.sh
+```
 
-Jenkins runs on a CentOS Stream 9 VM and automates the AWS deployment pipeline.
+The script coordinates the Terraform, Azure CLI, and Ansible deployment workflow.
 
-### Jenkins configuration
+### Deployment workflow
 
-| Item | Configuration |
+```mermaid
+flowchart TD
+    A["Start Azure Deployment"] --> B["Check Dependencies"]
+    B --> C["Verify Azure Authentication"]
+    C --> D["Decrypt and Validate Ansible Vault"]
+    D --> E["Terraform Init / Format / Validate"]
+    E --> F["Terraform Plan"]
+    F --> G{"Deployment Approved?"}
+    G -->|No| H["Cancel Deployment"]
+    G -->|Yes| I["Terraform Apply"]
+    I --> J["Read Terraform Outputs"]
+    J --> K["Generate Temporary Ansible Inventory"]
+    K --> L["Test WinRM Connectivity"]
+    L --> M["Configure AD DS"]
+    M --> N["Restart Domain Controller"]
+    N --> O["Verify AD DS and DNS Readiness"]
+    O --> P["Create OUs and Domain Users"]
+    P --> Q{"Windows Client Enabled?"}
+    Q -->|Yes| R["Join Client to Domain"]
+    Q -->|No| S["Skip Client Join"]
+    R --> T["Run Final Validation"]
+    S --> T
+    T --> U["Deployment Complete"]
+```
+
+### Prerequisites
+
+Before deployment, install and configure:
+
+- Microsoft Azure subscription
+- Azure CLI
+- Terraform
+- Python 3
+- Ansible
+- Required Ansible collections
+- PyYAML
+- Git
+- Network connectivity to the Azure management endpoints
+- Ansible Vault password file
+
+The Jenkins agent must also have the tools required by the CI/CD pipeline.
+
+### Authenticate to Azure
+
+```bash
+# Authenticate interactively to Microsoft Azure.
+az login
+
+# Select the subscription used by the Terraform configuration.
+az account set --subscription "<YOUR_AZURE_SUBSCRIPTION_ID>"
+
+# Verify the selected Azure subscription.
+az account show --output table
+```
+
+### Activate the Python virtual environment
+
+```bash
+# Activate the project's Ansible environment.
+source .venv/bin/activate
+
+# Confirm the active Ansible installation.
+ansible --version
+```
+
+### Configure Ansible Vault access
+
+For local deployment, the script can use the configured Vault password file.
+
+```bash
+# Point Ansible to the local Vault password file.
+export ANSIBLE_VAULT_PASSWORD_FILE="$HOME/.ansible_vault_pass"
+
+# Confirm the file is readable without printing its contents.
+test -r "$ANSIBLE_VAULT_PASSWORD_FILE"
+```
+
+### Run deployment
+
+```bash
+# Execute the complete Azure AD DS deployment workflow.
+./startupadds-azure.sh
+```
+
+Review the Terraform plan and deployment confirmation before allowing resources to be created.
+
+### Deployment outputs
+
+The orchestration script retrieves Terraform outputs such as:
+
+- Resource group name
+- Domain name
+- NetBIOS name
+- Domain controller private IP
+- Domain controller public IP
+- Optional client private IP
+- Optional client public IP
+
+These outputs are used to configure the temporary Ansible inventory and continue the deployment.
+
+## Jenkins CI/CD Pipeline
+
+The project includes a dedicated Azure pipeline:
+
+```text
+Jenkinsfile-Azure
+```
+
+The pipeline is designed to automate security analysis, deployment approval, Azure provisioning, and infrastructure destruction.
+
+### Pipeline operations
+
+The pipeline supports two selectable operations.
+
+| Action | Description |
 | --- | --- |
-| Jenkins server | `jenkinsServer` |
-| Jenkins home | `/var/lib/jenkins` |
-| Jenkins job | `windows-adds-aws-deployment` |
-| Repository branch | `main` |
-| Jenkinsfile | `Jenkinsfile-AWS` |
-| AWS region | `us-east-1` |
-| Ansible environment | `/opt/jenkins-tools/ansible` |
+| `APPLY` | Deploy Azure infrastructure and configure Active Directory |
+| `DESTROY` | Generate and review a Terraform destruction plan, then remove the infrastructure after approval |
+
+### Pipeline stages
+
+1. SCM Checkout
+2. Pre-deployment Checks
+3. Trivy Scan
+4. SonarQube Analysis
+5. SonarQube Quality Gate
+6. Deployment Approval
+7. Deploy Azure AD DS
+8. Destroy Plan
+9. Destroy Approval
+10. Destroy Azure Environment
+11. Deployment Summary
+12. Destroy Summary
+
+The stages are conditional on the selected operation.
+
+### Security scanning with Trivy
+
+Trivy scans the repository for:
+
+- Vulnerable dependencies
+- Exposed secrets
+- Terraform infrastructure misconfigurations
+
+The pipeline is configured to fail when HIGH or CRITICAL findings are detected.
+
+### SonarQube analysis
+
+The Azure project uses a separate SonarQube identity:
+
+| Setting | Value |
+| --- | --- |
+| Project key | `azure-windows-ad-lab` |
+| Project name | `Azure Windows AD Lab` |
+| Project version | `1.0` |
 | SonarQube server configuration | `SonarQube-Local` |
-| SonarQube Scanner installation | `SonarScanner` |
-| SonarQube project key | `aws-windows-ad-lab` |
+| Scanner installation | `SonarScanner` |
 
-### Jenkins credentials
+The pipeline waits for the SonarQube Quality Gate before proceeding to deployment or destruction.
 
-The pipeline uses Jenkins credentials rather than hardcoding AWS or Ansible secrets in the Jenkinsfile.
+### Azure Jenkins credentials
 
-| Credential ID | Purpose |
+The Azure pipeline uses Jenkins Credentials to protect authentication information.
+
+Expected credential IDs:
+
+| Jenkins credential ID | Purpose |
 | --- | --- |
-| `pumej_aws_access_id` | AWS access key ID |
-| `pumej_aws_secret_key` | AWS secret access key |
+| `azure_client_id` | Azure service principal client ID |
+| `azure_client_secret` | Azure service principal secret |
+| `azure_tenant_id` | Azure tenant ID |
+| `azure_subscription_id` | Azure subscription ID |
 | `ansible-vault-password-file` | Ansible Vault password file |
 
-These credentials must exist in Jenkins before running the deployment pipeline.
+The service principal must have the required Azure resource-management permissions and permissions to access the Terraform backend.
 
-### Jenkins pipeline stages
+### Deployment approval
 
-The pipeline includes the following stages:
+The APPLY operation requires manual approval before provisioning billable infrastructure.
 
-1. **SCM Checkout** – Retrieves the project from GitHub.
-2. **Pre-deployment Validation** – Checks required tools, files, and configuration.
-3. **Trivy Security Scan** – Scans the repository and Terraform configuration.
-4. **SonarQube Analysis** – Runs static code analysis.
-5. **SonarQube Quality Gate** – Evaluates the analysis result.
-6. **Deployment Approval** – Requires approval before an `APPLY` deployment.
-7. **Deploy AWS Active Directory** – Executes `startupadds-aws.sh`.
-8. **Destroy Plan** – Generates and displays a Terraform destroy plan when `DESTROY` is selected.
-9. **Destroy Approval** – Requires explicit approval before infrastructure removal.
-10. **Destroy AWS Environment** – Applies the reviewed destroy plan.
-11. **Deployment Summary** – Reports the deployment result.
-12. **Destroy Summary** – Reports the destruction result.
+### Destruction approval
 
-The pipeline uses timestamps, prevents concurrent deployments, and has a four-hour timeout for the overall job.
+The DESTROY operation:
 
-### Trivy security scanning
+1. Authenticates to Azure.
+2. Initializes Terraform.
+3. Checks that the Terraform state contains managed resources.
+4. Generates a saved destruction plan.
+5. Displays the planned resource deletions.
+6. Requires manual approval.
+7. Applies the reviewed destruction plan.
+8. Verifies that no managed resources remain in the Terraform state.
 
-Trivy is used to scan for:
+Saved Terraform plan files are removed after pipeline execution because they may contain sensitive infrastructure information.
 
-- Vulnerabilities.
-- Infrastructure-as-Code misconfigurations.
-- Exposed secrets.
-
-The pipeline is configured to report or fail on HIGH and CRITICAL findings according to the Jenkinsfile's scan settings.
-
-The Terraform egress exceptions documented in `network.tf` use inline Trivy suppression comments with an expiration date. These suppressions should be reviewed rather than treated as permanent exclusions.
-
-### SonarQube code analysis
-
-SonarQube analyzes the project source code and reports code quality and security findings.
-
-The Jenkins configuration uses:
-
-- Server installation: `SonarQube-Local`
-- Scanner installation: `SonarScanner`
-- Project key: `aws-windows-ad-lab`
-- Jenkins webhook endpoint: `/sonarqube-webhook/`
-
-The SonarQube webhook should be configured to point to the Jenkins endpoint so that the pipeline can receive quality gate results.
-
-### APPLY and DESTROY parameter
-
-The Jenkins job includes an `ACTION` choice parameter:
-
-```groovy
-parameters {
-    choice(
-        name: 'ACTION',
-        choices: ['APPLY', 'DESTROY'],
-        description: 'Choose APPLY to deploy or DESTROY to remove the AWS AD lab.'
-    )
-}
-```
-
-**APPLY** is the default selection.
-
-| Action | Behavior |
-| --- | --- |
-| `APPLY` | Runs validation, security scans, code analysis, approval, and AWS deployment. |
-| `DESTROY` | Runs validation, security scans, code analysis, generates a Terraform destroy plan, requests approval, and removes the AWS environment after approval. |
-
-A normal GitHub push webhook does not automatically select `DESTROY`. It triggers the job using the default parameter value, which is `APPLY`.
-
-To select `DESTROY`, use Jenkins **Build with Parameters** and choose `DESTROY`, or use an authenticated parameterized Jenkins API request.
-
-Example:
-
-```bash
-# Trigger a parameterized Jenkins build.
-# Replace the placeholders with the appropriate Jenkins values.
-curl -X POST \
-  -u "JENKINS_USER:JENKINS_API_TOKEN" \
-  "http://JENKINS_SERVER:8080/job/windows-adds-aws-deployment/buildWithParameters?ACTION=DESTROY"
-```
-
-Use a protected Jenkins endpoint and API token. Do not expose Jenkins credentials in scripts, logs, or source control.
-
-**Destroy safety:** The Terraform destroy operation must use the same backend, workspace, variables, and state as the original deployment. Review the generated destroy plan carefully before approving it. Do not run the `DESTROY` action until the Jenkins execution environment has been verified to use the correct Terraform state.
-
----
-
-## Jenkins Host Prerequisites and Troubleshooting
-
-### Jenkins Ansible environment
-
-The Jenkins controller requires the appropriate Ansible and Windows connection dependencies.
-
-Example dependency installation:
-
-```bash
-# Install Windows remoting dependencies into Jenkins' Ansible environment.
-sudo /opt/jenkins-tools/ansible/bin/python -m pip install \
-    pywinrm requests-ntlm
-
-# Verify Ansible is available.
-sudo /opt/jenkins-tools/ansible/bin/ansible-playbook --version
-
-# Verify the WinRM Python module.
-sudo /opt/jenkins-tools/ansible/bin/python -c \
-'import winrm; print("WinRM Python module available")'
-```
-
-The pipeline and deployment script must use this same Ansible environment.
-
-### Jenkins sudo permissions
-
-The deployment script requires elevated permissions for specific local operations, including:
-
-- Updating temporary hostname mappings in `/etc/hosts`.
-- Managing sudo authentication during deployment.
-- Inspecting local listening ports and SSM tunnel processes.
-
-During Jenkins integration, the `jenkins` service account initially failed because it was not authorized to run sudo.
-
-The lab server was configured with the following group membership:
-
-```bash
-# Add the Jenkins service account to the wheel group.
-sudo usermod -aG wheel jenkins
-
-# Verify the account's group membership.
-id jenkins
-
-# Validate sudoers syntax.
-sudo visudo -c
-```
-
-The CentOS sudoers configuration already grants the wheel group passwordless sudo:
-
-```text
-%wheel ALL=(ALL) NOPASSWD: ALL
-```
-
-The Jenkins service was restarted to load the new supplementary group membership.
-
-**Security warning:** This configuration grants Jenkins unrestricted passwordless root access on the Jenkins VM. It is a lab convenience, not a recommended production configuration. A production implementation should use narrowly scoped sudo permissions and isolate Jenkins build agents.
-
-### Useful troubleshooting commands
-
-```bash
-# Check Jenkins service status.
-sudo systemctl status jenkins --no-pager
-
-# Inspect Jenkins service logs.
-sudo journalctl -u jenkins -n 100 --no-pager
-
-# Check Jenkins sudo permissions.
-sudo -l -U jenkins
-
-# Check Jenkins group membership.
-id jenkins
-
-# Check the Ansible interpreter and version.
-sudo /opt/jenkins-tools/ansible/bin/ansible-playbook --version
-
-# Check whether the WinRM Python module is installed.
-sudo /opt/jenkins-tools/ansible/bin/python -m pip show pywinrm
-
-# Check for temporary Windows host mappings.
-grep -n -E 'DC01|CLIENT|AWS AD lab' /etc/hosts
-```
-
----
-
-## Deployment Prerequisites
-
-Before running the AWS deployment, ensure the following are available.
-
-### Local development environment
-
-- AWS account with permissions to create and manage the required resources.
-- AWS CLI configured with appropriate credentials.
-- Terraform installed.
-- Ansible installed in the project's Python virtual environment.
-- Python and required Ansible packages.
-- Required Ansible collections.
-- Git.
-- Trivy.
-- SonarQube Scanner if running local analysis outside Jenkins.
-
-### AWS requirements
-
-- AWS account and access credentials.
-- Correct AWS region (`us-east-1`).
-- Required EC2, VPC, IAM, SSM, and Secrets Manager permissions.
-- Appropriate Windows Server 2022 AMI availability.
-- Required network connectivity and instance profile permissions.
-
-### Jenkins requirements
-
-- Jenkins running on the CentOS Stream 9 VM.
-- GitHub repository access.
-- AWS credentials configured in Jenkins.
-- Ansible Vault password credential configured.
-- Terraform installed and available to Jenkins.
-- AWS CLI installed and configured through Jenkins credentials.
-- Session Manager plugin installed.
-- Ansible and `pywinrm` dependencies installed in the Jenkins Ansible environment.
-- Trivy installed.
-- SonarQube server and scanner configured.
-- SonarQube webhook configured.
-
----
-
-## Local Deployment
-
-The primary AWS deployment script is:
-
-```bash
-./startupadds-aws.sh
-```
-
-Before running it, validate your AWS identity:
-
-```bash
-# Confirm the AWS account and identity being used.
-aws sts get-caller-identity
-
-# Confirm the configured region.
-aws configure get region
-```
-
-Then run the deployment:
-
-```bash
-# Start the AWS AD DS deployment.
-./startupadds-aws.sh
-```
-
-Review the generated log under `logs/` and confirm the final success message.
-
----
+**Pipeline integration note:** The Azure deployment script must recognize the Jenkins `JENKINS_AUTO_APPROVE=true` environment variable to avoid waiting for an interactive terminal confirmation during automated builds. Verify that behavior before using the Jenkins APPLY operation.
 
 ## Validation and Testing
 
-The project uses multiple validation checkpoints.
+Successful provisioning alone does not prove that Active Directory is fully operational.
 
-### Infrastructure validation
+The deployment should be validated at multiple levels.
 
-- Confirm Terraform apply completes successfully.
-- Confirm the expected EC2 instances are running.
-- Confirm the Domain Controller and optional client have the expected private IP addresses.
-- Confirm the private instances are registered with Systems Manager.
+### Terraform validation
 
-### Windows connectivity validation
+```bash
+# Validate Terraform syntax and configuration.
+terraform -chdir=azure-ad-lab-terraform validate
 
-- Confirm SSM commands execute successfully.
-- Confirm SSM port forwarding is established.
-- Confirm WinRM HTTPS connectivity on port `5986`.
-- Confirm Ansible can execute the Windows connection test.
+# Review the current infrastructure state.
+terraform -chdir=azure-ad-lab-terraform state list
+
+# Display the Terraform outputs.
+terraform -chdir=azure-ad-lab-terraform output
+```
+
+### Azure resource validation
+
+```bash
+# Verify Azure authentication and subscription.
+az account show --output table
+
+# List resources in the project resource group.
+az resource list \
+    --resource-group pumej-ad-lab-rg \
+    --output table
+
+# Verify domain controller power state.
+az vm get-instance-view \
+    --resource-group pumej-ad-lab-rg \
+    --name DC01 \
+    --query "instanceView.statuses[].displayStatus" \
+    --output table
+```
 
 ### Active Directory validation
 
-- Confirm the Domain Controller is promoted successfully.
-- Confirm the domain is `pumejlab.com`.
-- Confirm the expected organizational units exist.
-- Confirm the expected domain accounts are imported.
-- Confirm the optional client joins the domain successfully.
+The final Ansible validation workflow should verify:
 
-### Example successful validation output
+- Domain controller availability.
+- Active Directory domain existence.
+- AD DS service status.
+- DNS service status.
+- Domain administrator authentication.
+- Expected organizational units.
+- Domain user creation.
+- Optional client domain membership.
 
-A successful deployment previously reported:
+### Windows client validation
 
-```text
-CLIENT_DOMAIN_OK: pumejlab.com
-```
+When the optional client is deployed, verify:
 
-The Ansible play recaps completed without failed or unreachable hosts, and the deployment script reported:
+- WinRM connectivity.
+- DNS resolution against the domain controller.
+- Successful domain membership.
+- Successful domain authentication.
 
-```text
-[SUCCESS] AWS Active Directory deployment completed.
-```
-
-These are examples of successful validation from a completed deployment, not a guarantee that every future deployment will produce identical results.
-
----
+The project should only be marked fully deployed and validated after these checks have actually passed.
 
 ## Security Considerations
 
-Security is incorporated throughout the project.
+Security is an important part of this project.
 
-- Windows instances remain in a private subnet.
-- No direct public RDP access is required.
-- AWS Systems Manager is used for remote management.
-- WinRM communication uses HTTPS.
-- Ansible secrets are encrypted with Ansible Vault.
-- AWS credentials are stored in Jenkins credentials.
-- Infrastructure is provisioned using Terraform.
-- Trivy checks for vulnerabilities, misconfigurations, and secrets.
-- SonarQube performs source-code analysis.
-- Jenkins requires approval before deployment and destruction.
-- Terraform destroy plans are generated before infrastructure removal.
+The following controls should be maintained:
 
-### Known lab trade-offs
+### Network security
 
-- The NAT instance provides outbound connectivity and is a single-instance dependency.
-- Documented Trivy egress suppressions require reassessment before February 1, 2027.
-- The Jenkins lab configuration grants the Jenkins account broad sudo privileges through the wheel group.
-- The lab's WinRM certificate-validation configuration is designed for its controlled environment and should be hardened for production.
-- AWS deployment costs continue while provisioned EC2, storage, and related resources remain active.
+- Restrict administrative access to trusted source IP addresses.
+- Use a narrow administrator CIDR, preferably a single trusted public IPv4 address with `/32`.
+- Avoid unrestricted inbound RDP or WinRM access.
+- Use WinRM over HTTPS for remote Windows administration.
+- Keep domain communication on the intended private network.
+- Verify NSG rules before exposing services.
 
----
+### Credential management
 
-## Cleanup and Resource Destruction
+- Use Ansible Vault to encrypt sensitive Ansible variables.
+- Store Azure service principal credentials in Jenkins Credentials.
+- Never commit secrets or password files.
+- Avoid displaying credentials in Jenkins console output.
+- Use least-privilege service principal permissions.
 
-The Jenkins pipeline provides a `DESTROY` option.
+### Terraform state protection
 
-Before destroying the environment:
+Terraform state can contain sensitive information, including administrator credentials.
 
-1. Confirm the correct AWS account and region.
-2. Confirm the Terraform backend and workspace.
-3. Confirm the state file represents the environment being destroyed.
-4. Review the generated Terraform destroy plan.
-5. Obtain the required Jenkins approval.
-6. Verify that the AWS resources have been removed.
+The `sensitive` setting on a Terraform variable or output controls display behavior; it does not encrypt the underlying value in Terraform state.
 
-Do not manually delete Terraform state files as a substitute for destroying infrastructure.
+Therefore:
 
-The destroy operation should use the same Terraform state and configuration that were used to create the environment.
+- Protect Terraform state files.
+- Never commit Terraform state to Git.
+- Protect saved Terraform plans.
+- Restrict access to Terraform working directories.
+- Use an appropriately secured remote backend for collaborative or CI/CD deployments.
 
----
+## Deployment Cleanup
 
-## Future Enhancement: Azure Deployment
+Azure resources can incur charges while running.
 
-The AWS environment is the first cloud implementation of this Active Directory automation project.
+Use the Terraform destruction workflow to remove the infrastructure when the lab is no longer needed.
 
-The next phase will extend the deployment to Microsoft Azure and integrate the Azure deployment into Jenkins CI/CD.
+### Manual Terraform cleanup
 
-Planned Azure implementation:
+```bash
+# Initialize the Terraform working directory.
+terraform -chdir=azure-ad-lab-terraform init
 
-- Azure resource group and virtual network.
-- Public and private subnet architecture.
-- Windows Server 2022 Domain Controller.
-- Optional Windows client for domain validation.
-- Azure networking and security controls.
-- Terraform infrastructure provisioning.
-- Ansible Windows configuration and AD DS automation.
-- Secure Azure authentication using a service principal or managed identity.
-- Azure remote Terraform state using Azure Storage.
-- Jenkins pipeline integration for Azure deployment.
-- Trivy and SonarQube security and code-quality scanning.
-- Separate approval and destruction workflows.
+# Review the resources scheduled for destruction.
+terraform -chdir=azure-ad-lab-terraform plan -destroy
 
-The intention is to maintain consistent Active Directory configuration and validation across both cloud providers while adapting infrastructure and authentication to each platform.
+# Destroy the reviewed infrastructure.
+terraform -chdir=azure-ad-lab-terraform destroy
+```
 
----
+### Jenkins cleanup
+
+Alternatively:
+
+1. Open the Azure AD Lab Jenkins job.
+2. Start a new build.
+3. Select `DESTROY`.
+4. Review the Destroy Plan stage.
+5. Approve the destruction operation.
+6. Review the Terraform destruction result.
+
+**Warning:** Destruction permanently removes the resources tracked by the selected Terraform state. Confirm the Azure subscription, Terraform workspace, and state before approving.
+
+Also verify whether any manually created resources exist outside Terraform state.
+
+## Cost Management
+
+This project is intended as a learning and portfolio lab, not a continuously running production environment.
+
+Potential Azure charges include:
+
+- Windows virtual machine compute.
+- Managed OS disks.
+- Public IPv4 addresses.
+- Network resources.
+- Supporting storage and diagnostic services.
+
+To control costs:
+
+- Deploy only the resources needed for testing.
+- Disable the optional Windows client when it is not required.
+- Avoid leaving virtual machines running unnecessarily.
+- Review Azure pricing and regional VM availability before deployment.
+- Destroy the infrastructure after completing the lab.
 
 ## Skills Demonstrated
 
-| Area | Skills |
+This project demonstrates practical experience with:
+
+## Cloud Engineering
+
+- Microsoft Azure resource provisioning
+- Virtual networks and subnetting
+- Azure networking and security
+- Windows virtual machine deployment
+
+## Infrastructure as Code**
+
+- Terraform configuration design
+- Reusable variables and outputs
+- Infrastructure planning and validation
+- Infrastructure lifecycle management
+
+## Systems Administration
+
+- Windows Server 2022
+- Active Directory Domain Services
+- DNS and domain management
+- Organizational unit administration
+- Domain user provisioning
+- Windows client domain joining
+
+## Automation and Configuration Management
+
+- Ansible playbooks
+- WinRM connectivity
+- PowerShell scripting
+- Ansible Vault
+- Repeatable deployment workflows
+
+## DevSecOps and CI/CD**
+
+- Jenkins declarative pipelines
+- Terraform deployment automation
+- Trivy security scanning
+- SonarQube code analysis
+- Quality Gate enforcement
+- Manual deployment and destruction approvals
+
+## Future Enhancements
+
+Potential improvements include:
+
+- Implement Azure Storage remote Terraform state with state locking and restricted access.
+- Integrate Azure Key Vault for additional secret-management capabilities.
+- Replace broad administrative access with a more tightly controlled management access path.
+- Implement Azure Bastion for administrative connectivity.
+- Add Group Policy Objects (GPOs) for centralized workstation and user configuration.
+- Add automated AD DS health checks and monitoring.
+- Add automated post-deployment security and compliance validation.
+- Improve Jenkins notifications and deployment reporting.
+- Add cost-management controls and automated cleanup policies.
+
+## Learning Resources
+
+- [Microsoft Learn: Create a Windows VM with Terraform](https://learn.microsoft.com/en-us/azure/virtual-machines/windows/quick-create-terraform)
+- [HashiCorp: AzureRM Provider Documentation](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs)
+- [HashiCorp: Azure Windows Virtual Machine Resource](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/windows_virtual_machine)
+- [Ansible Documentation](https://docs.ansible.com/)
+- [Microsoft Learn: Active Directory Domain Services](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/get-started/virtual-dc/active-directory-domain-services-overview)
+- [Microsoft Learn: Azure CLI](https://learn.microsoft.com/en-us/cli/azure/)
+- [Jenkins Pipeline Documentation](https://www.jenkins.io/doc/book/pipeline/)
+- [Trivy Documentation](https://trivy.dev/)
+- [SonarQube Documentation](https://docs.sonarsource.com/sonarqube-server/)
+
+## Project Status
+
+This repository is a hands-on cloud infrastructure and systems administration portfolio project.
+
+Deployment status should be updated based on actual Terraform, Ansible, Active Directory, and client validation results.
+
+| Component | Status |
 | --- | --- |
-| Cloud infrastructure | AWS VPC, EC2, IAM, SSM, Secrets Manager |
-| Infrastructure as Code | Terraform modules, resources, variables, outputs, state |
-| Windows administration | Windows Server 2022, PowerShell, AD DS, DNS |
-| Active Directory | Domains, OUs, users, domain joining |
-| Configuration management | Ansible, inventories, playbooks, Vault |
-| Network security | Public/private subnets, NAT, security groups, WinRM HTTPS |
-| Automation | Bash, Python, PowerShell |
-| CI/CD | Jenkins declarative pipelines, approvals, parameters |
-| DevSecOps | Trivy, SonarQube, quality gates |
-| Source control | Git, GitHub |
-| Troubleshooting | SSM, WinRM, IAM, Terraform, Jenkins, Linux administration |
+| Azure Terraform configuration | Implemented |
+| Azure deployment automation | Implemented |
+| Windows Server domain controller automation | Implemented |
+| Active Directory configuration | Implemented |
+| CSV-based user provisioning | Implemented |
+| Optional Windows client deployment | Configured |
+| Client domain join | Requires deployment validation |
+| Jenkins Azure pipeline | Pipeline implementation |
+| Trivy integration | Pipeline implementation |
+| SonarQube integration | Pipeline implementation |
+| Automated destruction | Pipeline implementation |
+
+**The project should only be represented as fully deployed when the corresponding Azure resources and Active Directory validation checks have succeeded.**
 
 ---
 
-## Project Outcome
+**Author:** Paul Umejiofor - Pumejlab
 
-This project demonstrates an automated Windows Server 2022 Active Directory deployment in AWS using Terraform, Ansible, AWS Systems Manager, and Jenkins.
+**Project:** Azure Windows Server 2022 Active Directory Domain Services Lab
 
-It brings together cloud infrastructure provisioning, Windows systems administration, Active Directory automation, private network design, secure remote management, configuration management, and DevSecOps practices.
+**Cloud Platform:** Microsoft Azure
 
-The Jenkins pipeline provides a repeatable workflow for validating, scanning, approving, deploying, and planning the destruction of the AWS environment.
-
-The next development milestone is to implement the equivalent Azure deployment and integrate it into Jenkins, extending the project into a multi-cloud Active Directory automation portfolio.
+**Automation:** Terraform, Ansible, Azure CLI, PowerShell, Jenkins
