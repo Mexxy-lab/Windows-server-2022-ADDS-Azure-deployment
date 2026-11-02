@@ -417,12 +417,17 @@ pipeline {
                             # Display the selected Terraform workspace.
                             terraform workspace show
 
-                            # Refuse to continue if Terraform has no tracked resources.
-                            if ! terraform state list | grep -q .; then
-                                echo "ERROR: Terraform state contains no managed resources."
-                                echo "Refusing to generate an empty destruction plan."
+                            # Capture the complete state list after destruction.
+                            STATE_RESOURCES="$(terraform state list)"
+
+                            # Fail if Terraform still tracks any managed resources.
+                            if [ -n "$STATE_RESOURCES" ]; then
+                                echo "WARNING: Terraform state still contains resources."
+                                printf '%s\n' "$STATE_RESOURCES"
                                 exit 1
                             fi
+
+                            echo "Terraform state contains no managed resources."
 
                             # Generate a saved destruction plan without deleting resources.
                             terraform plan \
@@ -550,13 +555,20 @@ pipeline {
                             echo "=========================================="
                             echo "Terraform destruction completed."
                             echo "=========================================="
+                            # Capture the complete state list before checking whether it is empty.
+                            # This avoids the SIGPIPE problem caused by grep -q with pipefail.
+                            STATE_RESOURCES="$(terraform state list)"
 
-                            # Confirm no managed resources remain in this state.
-                            if terraform state list | grep -q .; then
-                                echo "WARNING: Terraform state still contains resources."
-                                terraform state list
+                            # Refuse to continue if Terraform has no tracked resources.
+                            if [ -z "$STATE_RESOURCES" ]; then
+                                echo "ERROR: Terraform state contains no managed resources."
+                                echo "Refusing to generate an empty destruction plan."
                                 exit 1
                             fi
+
+                            # Display the resources that Terraform will consider for destruction.
+                            echo "Terraform resources currently tracked:"
+                            printf '%s\n' "$STATE_RESOURCES"
 
                             echo "Terraform state contains no managed resources."
                         '''
