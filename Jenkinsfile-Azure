@@ -489,7 +489,7 @@ pipeline {
                     string(
                         credentialsId: 'azure-ad-admin-password',
                         variable: 'TF_VAR_admin_password'
-                    )                    
+                    ),                    
 
                     string(
                         credentialsId: 'azure_client_id',
