@@ -1,0 +1,25 @@
+.venv/
+*.retry
+.vagrant/
+*.box
+*.log
+aws-ad-lab-terraform/.terraform/
+aws-ad-lab-terraform/*.tfstate
+aws-ad-lab-terraform/*.tfstate.*
+aws-ad-lab-terraform/*.tfplan
+crash.log
+crash.*.log
+terraform.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+azure-ad-lab-terraform/.terraform.lock.hcl
+azure-ad-lab-terraform/.terraform/
+azure-ad-lab-terraform/terraform.tfstate
+azure-ad-lab-terraform/terraform.tfstate.backup
+ProjectList.md
+gcp-adlab-terraform/
+Pictures/
+# Ansible Vault password
+.vault_pass
