@@ -359,6 +359,10 @@ pipeline {
 
                 // Retrieve Azure service principal credentials for Terraform.
                 withCredentials([
+                    string(
+                    credentialsId: 'azure-ad-admin-password',
+                    variable: 'TF_VAR_admin_password'
+                    )
 
                     string(
                         credentialsId: 'azure_client_id',
@@ -482,6 +486,10 @@ pipeline {
 
                 // Retrieve Azure service principal credentials for destruction.
                 withCredentials([
+                    string(
+                        credentialsId: 'azure-ad-admin-password',
+                        variable: 'TF_VAR_admin_password'
+                    )                    
 
                     string(
                         credentialsId: 'azure_client_id',
