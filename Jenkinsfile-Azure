@@ -417,17 +417,19 @@ pipeline {
                             # Display the selected Terraform workspace.
                             terraform workspace show
 
-                            # Capture the complete state list after destruction.
+                            # Capture all resources currently tracked by Terraform.
                             STATE_RESOURCES="$(terraform state list)"
 
-                            # Fail if Terraform still tracks any managed resources.
-                            if [ -n "$STATE_RESOURCES" ]; then
-                                echo "WARNING: Terraform state still contains resources."
-                                printf '%s\n' "$STATE_RESOURCES"
+                            # Refuse to generate an empty destruction plan.
+                            if [ -z "$STATE_RESOURCES" ]; then
+                                echo "ERROR: Terraform state contains no managed resources."
+                                echo "Refusing to generate an empty destruction plan."
                                 exit 1
                             fi
 
-                            echo "Terraform state contains no managed resources."
+                            # Display the resources Terraform currently manages.
+                            echo "Terraform resources currently tracked:"
+                            printf '%s\\n' "$STATE_RESOURCES"
 
                             # Generate a saved destruction plan without deleting resources.
                             terraform plan \
@@ -494,7 +496,7 @@ pipeline {
                     string(
                         credentialsId: 'azure-ad-admin-password',
                         variable: 'TF_VAR_admin_password'
-                    ),                    
+                    ),
 
                     string(
                         credentialsId: 'azure_client_id',
@@ -530,6 +532,8 @@ pipeline {
                             --output none
 
                         az account set --subscription "$ARM_SUBSCRIPTION_ID"
+
+                        echo "Authenticated to Azure subscription."
                     '''
 
                     dir('azure-ad-lab-terraform') {
@@ -541,11 +545,10 @@ pipeline {
                             echo "Destroying Azure Active Directory environment"
                             echo "=========================================="
 
-                            # Ensure the saved plan exists before proceeding.
+                            # Ensure the approved destruction plan exists.
                             test -s destroy.tfplan
 
                             # Apply the exact destruction plan reviewed earlier.
-                            # Terraform will fail if the state has changed.
                             terraform apply \
                                 -input=false \
                                 -lock-timeout=5m \
@@ -553,24 +556,21 @@ pipeline {
                                 destroy.tfplan
 
                             echo "=========================================="
-                            echo "Terraform destruction completed."
+                            echo "Verifying Terraform destruction"
                             echo "=========================================="
-                            # Capture the complete state list before checking whether it is empty.
-                            # This avoids the SIGPIPE problem caused by grep -q with pipefail.
+
+                            # Capture the remaining Terraform state.
                             STATE_RESOURCES="$(terraform state list)"
 
-                            # Refuse to continue if Terraform has no tracked resources.
-                            if [ -z "$STATE_RESOURCES" ]; then
-                                echo "ERROR: Terraform state contains no managed resources."
-                                echo "Refusing to generate an empty destruction plan."
+                            # Fail if any managed resources remain.
+                            if [ -n "$STATE_RESOURCES" ]; then
+                                echo "ERROR: Terraform state still contains resources."
+                                printf '%s\\n' "$STATE_RESOURCES"
                                 exit 1
                             fi
 
-                            # Display the resources that Terraform will consider for destruction.
-                            echo "Terraform resources currently tracked:"
-                            printf '%s\n' "$STATE_RESOURCES"
-
-                            echo "Terraform state contains no managed resources."
+                            echo "SUCCESS: Terraform state contains no managed resources."
+                            echo "Azure infrastructure destruction completed."
                         '''
                     }
                 }
