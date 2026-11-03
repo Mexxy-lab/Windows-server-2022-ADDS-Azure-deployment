@@ -14,22 +14,38 @@ pipeline {
     }
 
     options {
-        // Include timestamps in build logs.
         timestamps()
-
-        // Prevent simultaneous Azure infrastructure operations.
         disableConcurrentBuilds()
-
-        // Allow sufficient time for Windows provisioning and AD configuration.
         timeout(time: 4, unit: 'HOURS')
     }
 
     environment {
-        // Run Terraform in automation mode.
+
+        // Terraform automation mode.
         TF_IN_AUTOMATION = 'true'
 
-        // Use the shared Ansible virtual environment.
+        // Shared Ansible virtual environment and required tools.
         PATH = "/opt/jenkins-tools/ansible/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+
+        // --------------------------------------------------
+        // Azure service principal credentials
+        // --------------------------------------------------
+
+        // These variables are populated from Jenkins Credentials.
+        ARM_CLIENT_ID       = credentials('azure_client_id')
+        ARM_CLIENT_SECRET   = credentials('azure_client_secret')
+        ARM_TENANT_ID       = credentials('azure-tenant-id')
+        ARM_SUBSCRIPTION_ID = credentials('azure-subscription-id')
+
+        // --------------------------------------------------
+        // Terraform and Ansible credentials
+        // --------------------------------------------------
+
+        // Terraform Azure AD administrator password.
+        TF_VAR_admin_password = credentials('azure-ad-admin-password')
+
+        // Ansible Vault password file.
+        ANSIBLE_VAULT_PASSWORD_FILE = credentials('ansible-vault-password-file')
     }
 
     stages {
@@ -48,7 +64,6 @@ pipeline {
                     echo "Azure Windows Server 2022 AD DS Pipeline"
                     echo "========================================"
 
-                    # Display the selected operation.
                     echo "Selected action: $ACTION"
 
                     # Display the checked-out commit.
@@ -88,13 +103,9 @@ pipeline {
                     # Deployment-only tools are not required for DESTROY.
                     if [ "$ACTION" = "APPLY" ]; then
 
-                        # Confirm the Azure deployment script exists.
                         test -f startupadds-azure.sh
-
-                        # Validate Bash syntax without running deployment.
                         bash -n startupadds-azure.sh
 
-                        # Confirm Ansible and Python tools are available.
                         for cmd in ansible-playbook ansible \
                                    ansible-inventory ansible-vault \
                                    ansible-galaxy python3; do
@@ -104,7 +115,16 @@ pipeline {
                                 exit 1
                             }
                         done
+
+                        # Verify the Ansible Vault credential is accessible.
+                        test -r "$ANSIBLE_VAULT_PASSWORD_FILE"
                     fi
+
+                    # Verify the shared Azure credentials are populated.
+                    test -n "$ARM_CLIENT_ID"
+                    test -n "$ARM_CLIENT_SECRET"
+                    test -n "$ARM_TENANT_ID"
+                    test -n "$ARM_SUBSCRIPTION_ID"
 
                     # Display installed tool versions.
                     terraform version
@@ -134,7 +154,7 @@ pipeline {
                     echo "Trivy filesystem security scan"
                     echo "=========================================="
 
-                    # Scan the repository for vulnerable dependencies
+                    # Scan dependencies and repository files for vulnerabilities
                     # and exposed secrets.
                     trivy fs \
                         --scanners vuln,secret \
@@ -152,8 +172,7 @@ pipeline {
                     echo "Trivy Terraform IaC security scan"
                     echo "=========================================="
 
-                    # Scan Terraform configuration for infrastructure
-                    # misconfigurations.
+                    # Scan Terraform configuration for misconfigurations.
                     trivy config \
                         --misconfig-scanners terraform \
                         --severity HIGH,CRITICAL \
@@ -166,9 +185,7 @@ pipeline {
                         --skip-dirs .ansible \
                         .
 
-                    echo "=========================================="
                     echo "Trivy security scans passed."
-                    echo "=========================================="
                 '''
             }
         }
@@ -192,7 +209,6 @@ pipeline {
 
                             echo "Starting SonarQube analysis."
 
-                            # Analyze the checked-out Azure AD Lab repository.
                             "${scannerHome}/bin/sonar-scanner" \
                                 -Dsonar.projectKey=azure-windows-ad-lab \
                                 -Dsonar.projectName="Azure Windows AD Lab" \
@@ -256,91 +272,53 @@ pipeline {
             }
             steps {
 
-                // Retrieve Azure service principal credentials and
-                // Ansible Vault password securely from Jenkins Credentials.
-                withCredentials([
+                // Authenticate using the shared top-level credentials.
+                sh '''
+                    set +x
+                    set -e
 
-                    // Azure service principal application/client ID.
-                    string(
-                        credentialsId: 'azure_client_id',
-                        variable: 'ARM_CLIENT_ID'
-                    ),
+                    echo "=========================================="
+                    echo "Validating Azure credentials"
+                    echo "=========================================="
 
-                    // Azure service principal client secret.
-                    string(
-                        credentialsId: 'azure_client_secret',
-                        variable: 'ARM_CLIENT_SECRET'
-                    ),
+                    az login \
+                        --service-principal \
+                        --username "$ARM_CLIENT_ID" \
+                        --password "$ARM_CLIENT_SECRET" \
+                        --tenant "$ARM_TENANT_ID" \
+                        --output none
 
-                    // Azure tenant ID.
-                    string(
-                        credentialsId: 'azure-tenant-id',
-                        variable: 'ARM_TENANT_ID'
-                    ),
+                    # Select the Azure subscription.
+                    az account set --subscription "$ARM_SUBSCRIPTION_ID"
 
-                    // Azure subscription ID.
-                    string(
-                        credentialsId: 'azure-subscription-id',
-                        variable: 'ARM_SUBSCRIPTION_ID'
-                    ),
+                    # Display authenticated account information.
+                    az account show \
+                        --query "{subscription:name, subscriptionId:id, tenantId:tenantId}" \
+                        --output table
 
-                    // Ansible Vault password file.
-                    file(
-                        credentialsId: 'ansible-vault-password-file',
-                        variable: 'ANSIBLE_VAULT_PASSWORD_FILE'
-                    )
-                ]) {
+                    # Confirm the Ansible Vault password file is accessible.
+                    test -r "$ANSIBLE_VAULT_PASSWORD_FILE"
 
-                    // Authenticate to Azure and validate credentials.
+                    echo "Azure authentication and Vault validation passed."
+                '''
+
+                // The Jenkins approval stage has already been completed.
+                withEnv(['JENKINS_AUTO_APPROVE=true']) {
+
                     sh '''
                         set +x
                         set -e
 
+                        # Restrict access to the deployment script.
+                        chmod 700 startupadds-azure.sh
+
                         echo "=========================================="
-                        echo "Validating Azure credentials"
+                        echo "Starting Azure Active Directory deployment"
                         echo "=========================================="
 
-                        # Authenticate using the Azure service principal.
-                        az login \
-                            --service-principal \
-                            --username "$ARM_CLIENT_ID" \
-                            --password "$ARM_CLIENT_SECRET" \
-                            --tenant "$ARM_TENANT_ID" \
-                            --output none
-
-                        # Select the Azure subscription for this deployment.
-                        az account set --subscription "$ARM_SUBSCRIPTION_ID"
-
-                        # Display the authenticated Azure account.
-                        az account show \
-                            --query "{subscription:name, subscriptionId:id, tenantId:tenantId}" \
-                            --output table
-
-                        # Confirm that the Ansible Vault password file exists.
-                        test -r "$ANSIBLE_VAULT_PASSWORD_FILE"
-
-                        echo "Azure authentication and Vault validation passed."
+                        # Run the existing Azure deployment automation.
+                        ./startupadds-azure.sh
                     '''
-
-                    // The Jenkins approval stage has already been completed.
-                    withEnv(['JENKINS_AUTO_APPROVE=true']) {
-
-                        sh '''
-                            # Prevent shell command tracing from exposing secrets.
-                            set +x
-                            set -e
-
-                            # Restrict access to the deployment script.
-                            chmod 700 startupadds-azure.sh
-
-                            echo "=========================================="
-                            echo "Starting Azure Active Directory deployment"
-                            echo "=========================================="
-
-                            # Run the existing Azure deployment automation.
-                            ./startupadds-azure.sh
-                        '''
-                    }
                 }
             }
         }
@@ -357,100 +335,71 @@ pipeline {
             }
             steps {
 
-                // Retrieve Azure service principal credentials for Terraform.
-                withCredentials([
-                    string(
-                        credentialsId: 'azure-ad-admin-password',
-                        variable: 'TF_VAR_admin_password'
-                    ),
+                // Authenticate to Azure before Terraform operations.
+                sh '''
+                    set +x
+                    set -e
 
-                    string(
-                        credentialsId: 'azure_client_id',
-                        variable: 'ARM_CLIENT_ID'
-                    ),
+                    az login \
+                        --service-principal \
+                        --username "$ARM_CLIENT_ID" \
+                        --password "$ARM_CLIENT_SECRET" \
+                        --tenant "$ARM_TENANT_ID" \
+                        --output none
 
-                    string(
-                        credentialsId: 'azure_client_secret',
-                        variable: 'ARM_CLIENT_SECRET'
-                    ),
+                    az account set --subscription "$ARM_SUBSCRIPTION_ID"
 
-                    string(
-                        credentialsId: 'azure-tenant-id',
-                        variable: 'ARM_TENANT_ID'
-                    ),
+                    echo "Authenticated to Azure subscription."
+                '''
 
-                    string(
-                        credentialsId: 'azure-subscription-id',
-                        variable: 'ARM_SUBSCRIPTION_ID'
-                    )
-                ]) {
-
-                    // Authenticate to Azure before Terraform operations.
+                dir('azure-ad-lab-terraform') {
                     sh '''
                         set +x
-                        set -e
+                        set -euo pipefail
 
-                        az login \
-                            --service-principal \
-                            --username "$ARM_CLIENT_ID" \
-                            --password "$ARM_CLIENT_SECRET" \
-                            --tenant "$ARM_TENANT_ID" \
-                            --output none
+                        echo "=========================================="
+                        echo "Preparing Azure Terraform destruction plan"
+                        echo "=========================================="
 
-                        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+                        # Initialize the existing Terraform backend.
+                        terraform init -input=false
 
-                        echo "Authenticated to Azure subscription."
+                        # Display the selected Terraform workspace.
+                        terraform workspace show
+
+                        # Capture all resources currently tracked by Terraform.
+                        STATE_RESOURCES="$(terraform state list)"
+
+                        # Refuse to generate an empty destruction plan.
+                        if [ -z "$STATE_RESOURCES" ]; then
+                            echo "ERROR: Terraform state contains no managed resources."
+                            echo "Refusing to generate an empty destruction plan."
+                            exit 1
+                        fi
+
+                        # Display resources currently managed by Terraform.
+                        echo "Terraform resources currently tracked:"
+                        printf '%s\\n' "$STATE_RESOURCES"
+
+                        # Generate a saved destruction plan without deleting resources.
+                        terraform plan \
+                            -destroy \
+                            -input=false \
+                            -lock-timeout=5m \
+                            -out=destroy.tfplan
+
+                        # Display the resources scheduled for destruction.
+                        echo "=========================================="
+                        echo "REVIEW THE FOLLOWING DESTRUCTION PLAN"
+                        echo "=========================================="
+
+                        terraform show -no-color destroy.tfplan
+
+                        echo "=========================================="
+                        echo "Destroy plan generated successfully."
+                        echo "No Azure resources have been destroyed yet."
+                        echo "=========================================="
                     '''
-
-                    dir('azure-ad-lab-terraform') {
-                        sh '''
-                            set +x
-                            set -euo pipefail
-
-                            echo "=========================================="
-                            echo "Preparing Azure Terraform destruction plan"
-                            echo "=========================================="
-
-                            # Initialize the existing Terraform backend.
-                            terraform init -input=false
-
-                            # Display the selected Terraform workspace.
-                            terraform workspace show
-
-                            # Capture all resources currently tracked by Terraform.
-                            STATE_RESOURCES="$(terraform state list)"
-
-                            # Refuse to generate an empty destruction plan.
-                            if [ -z "$STATE_RESOURCES" ]; then
-                                echo "ERROR: Terraform state contains no managed resources."
-                                echo "Refusing to generate an empty destruction plan."
-                                exit 1
-                            fi
-
-                            # Display the resources Terraform currently manages.
-                            echo "Terraform resources currently tracked:"
-                            printf '%s\\n' "$STATE_RESOURCES"
-
-                            # Generate a saved destruction plan without deleting resources.
-                            terraform plan \
-                                -destroy \
-                                -input=false \
-                                -lock-timeout=5m \
-                                -out=destroy.tfplan
-
-                            # Display the resources scheduled for destruction.
-                            echo "=========================================="
-                            echo "REVIEW THE FOLLOWING DESTRUCTION PLAN"
-                            echo "=========================================="
-
-                            terraform show -no-color destroy.tfplan
-
-                            echo "=========================================="
-                            echo "Destroy plan generated successfully."
-                            echo "No Azure resources have been destroyed yet."
-                            echo "=========================================="
-                        '''
-                    }
                 }
             }
         }
@@ -491,88 +440,59 @@ pipeline {
             }
             steps {
 
-                // Retrieve Azure service principal credentials for destruction.
-                withCredentials([
-                    string(
-                        credentialsId: 'azure-ad-admin-password',
-                        variable: 'TF_VAR_admin_password'
-                    ),
+                // Reauthenticate before executing the destruction plan.
+                sh '''
+                    set +x
+                    set -e
 
-                    string(
-                        credentialsId: 'azure_client_id',
-                        variable: 'ARM_CLIENT_ID'
-                    ),
+                    az login \
+                        --service-principal \
+                        --username "$ARM_CLIENT_ID" \
+                        --password "$ARM_CLIENT_SECRET" \
+                        --tenant "$ARM_TENANT_ID" \
+                        --output none
 
-                    string(
-                        credentialsId: 'azure_client_secret',
-                        variable: 'ARM_CLIENT_SECRET'
-                    ),
+                    az account set --subscription "$ARM_SUBSCRIPTION_ID"
 
-                    string(
-                        credentialsId: 'azure-tenant-id',
-                        variable: 'ARM_TENANT_ID'
-                    ),
+                    echo "Authenticated to Azure subscription."
+                '''
 
-                    string(
-                        credentialsId: 'azure-subscription-id',
-                        variable: 'ARM_SUBSCRIPTION_ID'
-                    )
-                ]) {
-
-                    // Reauthenticate before executing the destruction plan.
+                dir('azure-ad-lab-terraform') {
                     sh '''
                         set +x
-                        set -e
+                        set -euo pipefail
 
-                        az login \
-                            --service-principal \
-                            --username "$ARM_CLIENT_ID" \
-                            --password "$ARM_CLIENT_SECRET" \
-                            --tenant "$ARM_TENANT_ID" \
-                            --output none
+                        echo "=========================================="
+                        echo "Destroying Azure Active Directory environment"
+                        echo "=========================================="
 
-                        az account set --subscription "$ARM_SUBSCRIPTION_ID"
+                        # Ensure the approved destruction plan exists.
+                        test -s destroy.tfplan
 
-                        echo "Authenticated to Azure subscription."
+                        # Apply the exact destruction plan reviewed earlier.
+                        terraform apply \
+                            -input=false \
+                            -lock-timeout=5m \
+                            -auto-approve \
+                            destroy.tfplan
+
+                        echo "=========================================="
+                        echo "Verifying Terraform destruction"
+                        echo "=========================================="
+
+                        # Capture the remaining Terraform state.
+                        STATE_RESOURCES="$(terraform state list)"
+
+                        # Fail if any managed resources remain.
+                        if [ -n "$STATE_RESOURCES" ]; then
+                            echo "ERROR: Terraform state still contains resources."
+                            printf '%s\\n' "$STATE_RESOURCES"
+                            exit 1
+                        fi
+
+                        echo "SUCCESS: Terraform state contains no managed resources."
+                        echo "Azure infrastructure destruction completed."
                     '''
-
-                    dir('azure-ad-lab-terraform') {
-                        sh '''
-                            set +x
-                            set -euo pipefail
-
-                            echo "=========================================="
-                            echo "Destroying Azure Active Directory environment"
-                            echo "=========================================="
-
-                            # Ensure the approved destruction plan exists.
-                            test -s destroy.tfplan
-
-                            # Apply the exact destruction plan reviewed earlier.
-                            terraform apply \
-                                -input=false \
-                                -lock-timeout=5m \
-                                -auto-approve \
-                                destroy.tfplan
-
-                            echo "=========================================="
-                            echo "Verifying Terraform destruction"
-                            echo "=========================================="
-
-                            # Capture the remaining Terraform state.
-                            STATE_RESOURCES="$(terraform state list)"
-
-                            # Fail if any managed resources remain.
-                            if [ -n "$STATE_RESOURCES" ]; then
-                                echo "ERROR: Terraform state still contains resources."
-                                printf '%s\\n' "$STATE_RESOURCES"
-                                exit 1
-                            fi
-
-                            echo "SUCCESS: Terraform state contains no managed resources."
-                            echo "Azure infrastructure destruction completed."
-                        '''
-                    }
                 }
             }
         }
@@ -641,6 +561,7 @@ pipeline {
         }
 
         always {
+
             // Remove the saved destruction plan after the pipeline finishes.
             // Terraform plan files can contain sensitive infrastructure data.
             sh '''
